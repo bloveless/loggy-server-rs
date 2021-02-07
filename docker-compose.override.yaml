@@ -1,0 +1,11 @@
+version: "3.2"
+
+services:
+  loggy-server:
+    build:
+      target: "develop"
+    command: 
+    - cargo
+    - watch
+    - -x
+    - run
