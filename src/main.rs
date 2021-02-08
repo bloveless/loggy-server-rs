@@ -1,8 +1,11 @@
 use actix_web::middleware::Logger;
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
-use chrono::DateTime;
-use mongodb::bson::{self, doc};
+use chrono::{DateTime, Utc};
 use mongodb::Client;
+use mongodb::{
+    bson::{self, doc},
+    options::UpdateOptions,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -23,41 +26,49 @@ struct LogLine {
 
 #[post("/collect")]
 async fn collect(log_line: web::Json<LogLine>, client: web::Data<Client>) -> impl Responder {
-    println!("Log line: {:?}", log_line);
-
-    let date_time = DateTime::parse_from_rfc3339(&log_line.datetime).unwrap();
-    println!("Parsed DateTime: {:?}", date_time);
-
-    println!("Message: {}", log_line.message);
-
-    let mut document = doc! {
-        "datetime": &log_line.datetime,
-        "stream": match &log_line.stream {
-            Stream::StdErr => "stderr",
-            Stream::StdOut => "stdout",
-        },
-        "container" : &log_line.container,
-        "namespace": &log_line.namespace,
+    let date_time: DateTime<Utc> = DateTime::from(DateTime::parse_from_rfc3339(&log_line.datetime).unwrap());
+    let mut updates = doc! {
+        "$setOnInsert": {},
     };
 
     match serde_json::from_str::<serde_json::Map<String, Value>>(log_line.message.as_str()) {
         Ok(value) => {
-            document.insert("message", bson::ser::to_document(&value).unwrap());
-        }
+            updates.get_document_mut("$setOnInsert")
+                .unwrap()
+                .insert("message",  bson::ser::to_document(&value).unwrap())
+        },
         Err(_) => {
-            document.insert("message", &log_line.message);
-        }
+            updates.get_document_mut("$setOnInsert")
+                .unwrap()
+                .insert("message", &log_line.message)
+        },
     };
 
     let db = client.database("logs");
     let coll = db.collection("log-collection");
 
-    let result = match coll.insert_one(document, None).await {
-        Ok(result) => result,
-        Err(_) => panic!("Unable to insert into collection"),
-    };
+    let mut update_options = UpdateOptions::default();
+    update_options.upsert = Some(true);
 
-    println!("Result id: {}", result.inserted_id);
+    match coll
+        .update_one(
+            doc! {
+                "datetime": date_time,
+                "stream": match log_line.stream {
+                    Stream::StdErr => "stderr",
+                    Stream::StdOut => "stdout",
+                },
+                "container": &log_line.container,
+                "namespace": &log_line.namespace,
+            },
+            updates,
+            update_options,
+        )
+        .await
+    {
+        Ok(result) => println!("UpdateResult: {:?}", result),
+        Err(e) => println!("Unable to write to mongodb: {:?}", e),
+    };
 
     HttpResponse::Ok().body("Received log message")
 }
